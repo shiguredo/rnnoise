@@ -100,6 +100,151 @@ void compute_dense(const DenseLayer* layer, float* output, const float* input) {
   }
 }
 
+#if ENABLE_WASM_SIMD
+
+#include <wasm_simd128.h>
+
+static inline v128_t _wasm_load_f32x4(const void* p) {
+  return wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(
+      wasm_i16x8_extend_low_i8x16(wasm_v128_load(p))));
+}
+
+static inline v128_t _wasm_f32x4_fmadd(v128_t a, v128_t b, v128_t c) {
+  return wasm_f32x4_add(wasm_f32x4_mul(a, b), c);
+}
+
+static void _compute_gru_gates_wasm_simd(const GRULayer* gru,
+                                         const float* state,
+                                         const float* input,
+                                         float z[MAX_NEURONS],
+                                         float r[MAX_NEURONS]) {
+  int i;
+  int N = gru->nb_neurons;
+  int M = gru->nb_inputs;
+  int stride = 3 * N;
+  int batch_size = 4;
+
+  for (i = 0; i + batch_size <= N; i += batch_size) {
+    v128_t z_sum = _wasm_load_f32x4(&gru->bias[i]);
+    v128_t r_sum = _wasm_load_f32x4(&gru->bias[N + i]);
+
+    for (int j = 0; j < M; j++) {
+      v128_t z_input_weights =
+          _wasm_load_f32x4(&gru->input_weights[j * stride + i]);
+      v128_t r_input_weights =
+          _wasm_load_f32x4(&gru->input_weights[N + j * stride + i]);
+      v128_t input_values = wasm_v128_load32_splat(&input[j]);
+      z_sum = _wasm_f32x4_fmadd(z_input_weights, input_values, z_sum);
+      r_sum = _wasm_f32x4_fmadd(r_input_weights, input_values, r_sum);
+    }
+    for (int j = 0; j < N; j++) {
+      v128_t z_recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[j * stride + i]);
+      v128_t r_recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[N + j * stride + i]);
+      v128_t state_values = wasm_v128_load32_splat(&state[j]);
+      z_sum = _wasm_f32x4_fmadd(z_recurrent_weights, state_values, z_sum);
+      r_sum = _wasm_f32x4_fmadd(r_recurrent_weights, state_values, r_sum);
+    }
+
+    wasm_v128_store(&z[i], z_sum);
+    wasm_v128_store(&r[i], r_sum);
+  }
+
+  for (; i < N; i++) {
+    float z_sum = gru->bias[i];
+    float r_sum = gru->bias[N + i];
+
+    for (int j = 0; j < M; j++) {
+      z_sum += gru->input_weights[j * stride + i] * input[j];
+      r_sum += gru->input_weights[N + j * stride + i] * input[j];
+    }
+    for (int j = 0; j < N; j++) {
+      z_sum += gru->recurrent_weights[j * stride + i] * state[j];
+      r_sum += gru->recurrent_weights[N + j * stride + i] * state[j];
+    }
+
+    z[i] = z_sum;
+    r[i] = r_sum;
+  }
+
+  for (i = 0; i < N; i++) {
+    z[i] = sigmoid_approx(WEIGHTS_SCALE * z[i]);
+    r[i] = sigmoid_approx(WEIGHTS_SCALE * r[i]);
+  }
+}
+
+static void _compute_gru_output_wasm_simd(const GRULayer* gru,
+                                          float* state,
+                                          const float* input,
+                                          const float z[MAX_NEURONS],
+                                          const float r[MAX_NEURONS]) {
+  int i;
+  int N = gru->nb_neurons;
+  int M = gru->nb_inputs;
+  int stride = 3 * N;
+  int batch_size = 4;
+  float h[MAX_NEURONS];
+
+  for (i = 0; i + batch_size <= N; i += batch_size) {
+    v128_t sum = _wasm_load_f32x4(&gru->bias[2 * N + i]);
+
+    for (int j = 0; j < M; j++) {
+      v128_t input_weights =
+          _wasm_load_f32x4(&gru->input_weights[2 * N + j * stride + i]);
+      v128_t input_values = wasm_v128_load32_splat(&input[j]);
+      sum = _wasm_f32x4_fmadd(input_weights, input_values, sum);
+    }
+    for (int j = 0; j < N; j++) {
+      v128_t recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[2 * N + j * stride + i]);
+      v128_t state_values = wasm_f32x4_splat(state[j] * r[j]);
+      sum = _wasm_f32x4_fmadd(recurrent_weights, state_values, sum);
+    }
+
+    wasm_v128_store(&h[i], sum);
+  }
+
+  for (; i < N; i++) {
+    float sum = gru->bias[2 * N + i];
+
+    for (int j = 0; j < M; j++)
+      sum += gru->input_weights[2 * N + j * stride + i] * input[j];
+    for (int j = 0; j < N; j++)
+      sum += gru->recurrent_weights[2 * N + j * stride + i] * state[j] * r[j];
+
+    h[i] = sum;
+  }
+
+  for (i = 0; i < N; i++) {
+    float sum = h[i];
+
+    if (gru->activation == ACTIVATION_SIGMOID)
+      sum = sigmoid_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_TANH)
+      sum = tansig_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_RELU)
+      sum = relu(WEIGHTS_SCALE * sum);
+    else
+      *(int*)0 = 0;
+
+    state[i] = z[i] * state[i] + (1 - z[i]) * sum;
+  }
+}
+
+void compute_gru(const GRULayer* gru, float* state, const float* input) {
+  float z[MAX_NEURONS];
+  float r[MAX_NEURONS];
+
+  /* Compute update and reset gates. */
+  _compute_gru_gates_wasm_simd(gru, state, input, z, r);
+
+  /* Compute output. */
+  _compute_gru_output_wasm_simd(gru, state, input, z, r);
+}
+
+#else
+
 void compute_gru(const GRULayer* gru, float* state, const float* input) {
   int i, j;
   int N, M;
@@ -148,6 +293,8 @@ void compute_gru(const GRULayer* gru, float* state, const float* input) {
   for (i = 0; i < N; i++)
     state[i] = h[i];
 }
+
+#endif
 
 #define INPUT_SIZE 42
 
