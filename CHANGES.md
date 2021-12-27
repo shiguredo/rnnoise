@@ -13,11 +13,15 @@
 
 ## 2021.1.0
 
-- [UPDATE] READMEとCOPYINGを更新 ([#1](https://github.com/shiguredo/rnnoise/pull/1))
+- [UPDATE] READMEとCOPYINGを更新
+    - https://github.com/shiguredo/rnnoise/pull/1
     - @sile
-- [UPDATE] clang-formatを適用 ([#2](https://github.com/shiguredo/rnnoise/pull/2))
+- [UPDATE] clang-formatを適用
+    - https://github.com/shiguredo/rnnoise/pull/2
     - @sile
-- [ADD] WebAssembly SIMDサポートを追加 ([#3](https://github.com/shiguredo/rnnoise/pull/3))
+- [ADD] WebAssembly SIMDサポートを追加
+    - https://github.com/shiguredo/rnnoise/pull/3
     - @sile
-- [UPDATE] 実行されないブランチでのエラー処理を改善 ([#4](https://github.com/shiguredo/rnnoise/pull/4))
+- [UPDATE] 実行されないブランチでのエラー処理を改善
+    - https://github.com/shiguredo/rnnoise/pull/4
     - @sile
