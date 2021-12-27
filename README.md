@@ -27,6 +27,13 @@ $ ./configure
 $ make
 ```
 
+### WebAssembly SIMDを有効にする場合
+
+以下のように`--enable-wasm-simd`を指定して`configure`を実行してください:
+```console
+$ ./configure --enable-wasm-simd
+```
+
 ## ライセンス
 
 修正BSDライセンスです。詳細は[COPYING](COPYING)を参照してください。
