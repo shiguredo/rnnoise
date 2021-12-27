@@ -36,6 +36,8 @@ $ ./configure --enable-wasm-simd
 
 ## ライセンス
 
+[The 3-Clause BSD License](https://opensource.org/licenses/BSD-3-Clause)
+
 ```
 Copyright (c) 2021, Shiguredo Inc.
 Copyright (c) 2017, Mozilla
@@ -71,4 +73,4 @@ THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
 OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 ```
 
-修正BSDライセンスです。詳細は [COPYING](COPYING) を参照してください。
+詳細は [COPYING](COPYING) を参照してください。
