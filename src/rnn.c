@@ -29,150 +29,303 @@
 #include "config.h"
 #endif
 
+#include <assert.h>
 #include <math.h>
-#include "opus_types.h"
-#include "common.h"
+#include <stdio.h>
 #include "arch.h"
-#include "tansig_table.h"
+#include "common.h"
+#include "opus_types.h"
 #include "rnn.h"
 #include "rnn_data.h"
-#include <stdio.h>
+#include "tansig_table.h"
 
-static OPUS_INLINE float tansig_approx(float x)
-{
-    int i;
-    float y, dy;
-    float sign=1;
-    /* Tests are reversed to catch NaNs */
-    if (!(x<8))
-        return 1;
-    if (!(x>-8))
-        return -1;
+static OPUS_INLINE float tansig_approx(float x) {
+  int i;
+  float y, dy;
+  float sign = 1;
+  /* Tests are reversed to catch NaNs */
+  if (!(x < 8))
+    return 1;
+  if (!(x > -8))
+    return -1;
 #ifndef FIXED_POINT
-    /* Another check in case of -ffast-math */
-    if (celt_isnan(x))
-       return 0;
+  /* Another check in case of -ffast-math */
+  if (celt_isnan(x))
+    return 0;
 #endif
-    if (x<0)
-    {
-       x=-x;
-       sign=-1;
+  if (x < 0) {
+    x = -x;
+    sign = -1;
+  }
+  i = (int)floor(.5f + 25 * x);
+  x -= .04f * i;
+  y = tansig_table[i];
+  dy = 1 - y * y;
+  y = y + x * dy * (1 - y * x);
+  return sign * y;
+}
+
+static OPUS_INLINE float sigmoid_approx(float x) {
+  return .5 + .5 * tansig_approx(.5 * x);
+}
+
+static OPUS_INLINE float relu(float x) {
+  return x < 0 ? 0 : x;
+}
+
+void compute_dense(const DenseLayer* layer, float* output, const float* input) {
+  int i, j;
+  int N, M;
+  int stride;
+  M = layer->nb_inputs;
+  N = layer->nb_neurons;
+  stride = N;
+  for (i = 0; i < N; i++) {
+    /* Compute update gate. */
+    float sum = layer->bias[i];
+    for (j = 0; j < M; j++)
+      sum += layer->input_weights[j * stride + i] * input[j];
+    output[i] = WEIGHTS_SCALE * sum;
+  }
+  if (layer->activation == ACTIVATION_SIGMOID) {
+    for (i = 0; i < N; i++)
+      output[i] = sigmoid_approx(output[i]);
+  } else if (layer->activation == ACTIVATION_TANH) {
+    for (i = 0; i < N; i++)
+      output[i] = tansig_approx(output[i]);
+  } else if (layer->activation == ACTIVATION_RELU) {
+    for (i = 0; i < N; i++)
+      output[i] = relu(output[i]);
+  } else {
+    /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+    assert(0);
+  }
+}
+
+#if ENABLE_WASM_SIMD
+
+#include <wasm_simd128.h>
+
+static inline v128_t _wasm_load_f32x4(const void* p) {
+  return wasm_f32x4_convert_i32x4(wasm_i32x4_extend_low_i16x8(
+      wasm_i16x8_extend_low_i8x16(wasm_v128_load(p))));
+}
+
+static inline v128_t _wasm_f32x4_fmadd(v128_t a, v128_t b, v128_t c) {
+  return wasm_f32x4_add(wasm_f32x4_mul(a, b), c);
+}
+
+static void _compute_gru_gates_wasm_simd(const GRULayer* gru,
+                                         const float* state,
+                                         const float* input,
+                                         float z[MAX_NEURONS],
+                                         float r[MAX_NEURONS]) {
+  int i;
+  int N = gru->nb_neurons;
+  int M = gru->nb_inputs;
+  int stride = 3 * N;
+  int batch_size = 4;
+
+  for (i = 0; i + batch_size <= N; i += batch_size) {
+    v128_t z_sum = _wasm_load_f32x4(&gru->bias[i]);
+    v128_t r_sum = _wasm_load_f32x4(&gru->bias[N + i]);
+
+    for (int j = 0; j < M; j++) {
+      v128_t z_input_weights =
+          _wasm_load_f32x4(&gru->input_weights[j * stride + i]);
+      v128_t r_input_weights =
+          _wasm_load_f32x4(&gru->input_weights[N + j * stride + i]);
+      v128_t input_values = wasm_v128_load32_splat(&input[j]);
+      z_sum = _wasm_f32x4_fmadd(z_input_weights, input_values, z_sum);
+      r_sum = _wasm_f32x4_fmadd(r_input_weights, input_values, r_sum);
     }
-    i = (int)floor(.5f+25*x);
-    x -= .04f*i;
-    y = tansig_table[i];
-    dy = 1-y*y;
-    y = y + x*dy*(1 - y*x);
-    return sign*y;
+    for (int j = 0; j < N; j++) {
+      v128_t z_recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[j * stride + i]);
+      v128_t r_recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[N + j * stride + i]);
+      v128_t state_values = wasm_v128_load32_splat(&state[j]);
+      z_sum = _wasm_f32x4_fmadd(z_recurrent_weights, state_values, z_sum);
+      r_sum = _wasm_f32x4_fmadd(r_recurrent_weights, state_values, r_sum);
+    }
+
+    wasm_v128_store(&z[i], z_sum);
+    wasm_v128_store(&r[i], r_sum);
+  }
+
+  for (; i < N; i++) {
+    float z_sum = gru->bias[i];
+    float r_sum = gru->bias[N + i];
+
+    for (int j = 0; j < M; j++) {
+      z_sum += gru->input_weights[j * stride + i] * input[j];
+      r_sum += gru->input_weights[N + j * stride + i] * input[j];
+    }
+    for (int j = 0; j < N; j++) {
+      z_sum += gru->recurrent_weights[j * stride + i] * state[j];
+      r_sum += gru->recurrent_weights[N + j * stride + i] * state[j];
+    }
+
+    z[i] = z_sum;
+    r[i] = r_sum;
+  }
+
+  for (i = 0; i < N; i++) {
+    z[i] = sigmoid_approx(WEIGHTS_SCALE * z[i]);
+    r[i] = sigmoid_approx(WEIGHTS_SCALE * r[i]);
+  }
 }
 
-static OPUS_INLINE float sigmoid_approx(float x)
-{
-   return .5 + .5*tansig_approx(.5*x);
+static void _compute_gru_output_wasm_simd(const GRULayer* gru,
+                                          float* state,
+                                          const float* input,
+                                          const float z[MAX_NEURONS],
+                                          const float r[MAX_NEURONS]) {
+  int i;
+  int N = gru->nb_neurons;
+  int M = gru->nb_inputs;
+  int stride = 3 * N;
+  int batch_size = 4;
+  float h[MAX_NEURONS];
+
+  for (i = 0; i + batch_size <= N; i += batch_size) {
+    v128_t sum = _wasm_load_f32x4(&gru->bias[2 * N + i]);
+
+    for (int j = 0; j < M; j++) {
+      v128_t input_weights =
+          _wasm_load_f32x4(&gru->input_weights[2 * N + j * stride + i]);
+      v128_t input_values = wasm_v128_load32_splat(&input[j]);
+      sum = _wasm_f32x4_fmadd(input_weights, input_values, sum);
+    }
+    for (int j = 0; j < N; j++) {
+      v128_t recurrent_weights =
+          _wasm_load_f32x4(&gru->recurrent_weights[2 * N + j * stride + i]);
+      v128_t state_values = wasm_f32x4_splat(state[j] * r[j]);
+      sum = _wasm_f32x4_fmadd(recurrent_weights, state_values, sum);
+    }
+
+    wasm_v128_store(&h[i], sum);
+  }
+
+  for (; i < N; i++) {
+    float sum = gru->bias[2 * N + i];
+
+    for (int j = 0; j < M; j++)
+      sum += gru->input_weights[2 * N + j * stride + i] * input[j];
+    for (int j = 0; j < N; j++)
+      sum += gru->recurrent_weights[2 * N + j * stride + i] * state[j] * r[j];
+
+    h[i] = sum;
+  }
+
+  for (i = 0; i < N; i++) {
+    float sum = h[i];
+
+    if (gru->activation == ACTIVATION_SIGMOID)
+      sum = sigmoid_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_TANH)
+      sum = tansig_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_RELU)
+      sum = relu(WEIGHTS_SCALE * sum);
+    else
+      /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+      assert(0);
+
+    state[i] = z[i] * state[i] + (1 - z[i]) * sum;
+  }
 }
 
-static OPUS_INLINE float relu(float x)
-{
-   return x < 0 ? 0 : x;
+void compute_gru(const GRULayer* gru, float* state, const float* input) {
+  float z[MAX_NEURONS];
+  float r[MAX_NEURONS];
+
+  /* Compute update and reset gates. */
+  _compute_gru_gates_wasm_simd(gru, state, input, z, r);
+
+  /* Compute output. */
+  _compute_gru_output_wasm_simd(gru, state, input, z, r);
 }
 
-void compute_dense(const DenseLayer *layer, float *output, const float *input)
-{
-   int i, j;
-   int N, M;
-   int stride;
-   M = layer->nb_inputs;
-   N = layer->nb_neurons;
-   stride = N;
-   for (i=0;i<N;i++)
-   {
-      /* Compute update gate. */
-      float sum = layer->bias[i];
-      for (j=0;j<M;j++)
-         sum += layer->input_weights[j*stride + i]*input[j];
-      output[i] = WEIGHTS_SCALE*sum;
-   }
-   if (layer->activation == ACTIVATION_SIGMOID) {
-      for (i=0;i<N;i++)
-         output[i] = sigmoid_approx(output[i]);
-   } else if (layer->activation == ACTIVATION_TANH) {
-      for (i=0;i<N;i++)
-         output[i] = tansig_approx(output[i]);
-   } else if (layer->activation == ACTIVATION_RELU) {
-      for (i=0;i<N;i++)
-         output[i] = relu(output[i]);
-   } else {
-     *(int*)0=0;
-   }
+#else
+
+void compute_gru(const GRULayer* gru, float* state, const float* input) {
+  int i, j;
+  int N, M;
+  int stride;
+  float z[MAX_NEURONS];
+  float r[MAX_NEURONS];
+  float h[MAX_NEURONS];
+  M = gru->nb_inputs;
+  N = gru->nb_neurons;
+  stride = 3 * N;
+  for (i = 0; i < N; i++) {
+    /* Compute update gate. */
+    float sum = gru->bias[i];
+    for (j = 0; j < M; j++)
+      sum += gru->input_weights[j * stride + i] * input[j];
+    for (j = 0; j < N; j++)
+      sum += gru->recurrent_weights[j * stride + i] * state[j];
+    z[i] = sigmoid_approx(WEIGHTS_SCALE * sum);
+  }
+  for (i = 0; i < N; i++) {
+    /* Compute reset gate. */
+    float sum = gru->bias[N + i];
+    for (j = 0; j < M; j++)
+      sum += gru->input_weights[N + j * stride + i] * input[j];
+    for (j = 0; j < N; j++)
+      sum += gru->recurrent_weights[N + j * stride + i] * state[j];
+    r[i] = sigmoid_approx(WEIGHTS_SCALE * sum);
+  }
+  for (i = 0; i < N; i++) {
+    /* Compute output. */
+    float sum = gru->bias[2 * N + i];
+    for (j = 0; j < M; j++)
+      sum += gru->input_weights[2 * N + j * stride + i] * input[j];
+    for (j = 0; j < N; j++)
+      sum += gru->recurrent_weights[2 * N + j * stride + i] * state[j] * r[j];
+    if (gru->activation == ACTIVATION_SIGMOID)
+      sum = sigmoid_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_TANH)
+      sum = tansig_approx(WEIGHTS_SCALE * sum);
+    else if (gru->activation == ACTIVATION_RELU)
+      sum = relu(WEIGHTS_SCALE * sum);
+    else
+      /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+      assert(0);
+    h[i] = z[i] * state[i] + (1 - z[i]) * sum;
+  }
+  for (i = 0; i < N; i++)
+    state[i] = h[i];
 }
 
-void compute_gru(const GRULayer *gru, float *state, const float *input)
-{
-   int i, j;
-   int N, M;
-   int stride;
-   float z[MAX_NEURONS];
-   float r[MAX_NEURONS];
-   float h[MAX_NEURONS];
-   M = gru->nb_inputs;
-   N = gru->nb_neurons;
-   stride = 3*N;
-   for (i=0;i<N;i++)
-   {
-      /* Compute update gate. */
-      float sum = gru->bias[i];
-      for (j=0;j<M;j++)
-         sum += gru->input_weights[j*stride + i]*input[j];
-      for (j=0;j<N;j++)
-         sum += gru->recurrent_weights[j*stride + i]*state[j];
-      z[i] = sigmoid_approx(WEIGHTS_SCALE*sum);
-   }
-   for (i=0;i<N;i++)
-   {
-      /* Compute reset gate. */
-      float sum = gru->bias[N + i];
-      for (j=0;j<M;j++)
-         sum += gru->input_weights[N + j*stride + i]*input[j];
-      for (j=0;j<N;j++)
-         sum += gru->recurrent_weights[N + j*stride + i]*state[j];
-      r[i] = sigmoid_approx(WEIGHTS_SCALE*sum);
-   }
-   for (i=0;i<N;i++)
-   {
-      /* Compute output. */
-      float sum = gru->bias[2*N + i];
-      for (j=0;j<M;j++)
-         sum += gru->input_weights[2*N + j*stride + i]*input[j];
-      for (j=0;j<N;j++)
-         sum += gru->recurrent_weights[2*N + j*stride + i]*state[j]*r[j];
-      if (gru->activation == ACTIVATION_SIGMOID) sum = sigmoid_approx(WEIGHTS_SCALE*sum);
-      else if (gru->activation == ACTIVATION_TANH) sum = tansig_approx(WEIGHTS_SCALE*sum);
-      else if (gru->activation == ACTIVATION_RELU) sum = relu(WEIGHTS_SCALE*sum);
-      else *(int*)0=0;
-      h[i] = z[i]*state[i] + (1-z[i])*sum;
-   }
-   for (i=0;i<N;i++)
-      state[i] = h[i];
-}
+#endif
 
 #define INPUT_SIZE 42
 
-void compute_rnn(RNNState *rnn, float *gains, float *vad, const float *input) {
+void compute_rnn(RNNState* rnn, float* gains, float* vad, const float* input) {
   int i;
   float dense_out[MAX_NEURONS];
-  float noise_input[MAX_NEURONS*3];
-  float denoise_input[MAX_NEURONS*3];
+  float noise_input[MAX_NEURONS * 3];
+  float denoise_input[MAX_NEURONS * 3];
   compute_dense(rnn->model->input_dense, dense_out, input);
   compute_gru(rnn->model->vad_gru, rnn->vad_gru_state, dense_out);
   compute_dense(rnn->model->vad_output, vad, rnn->vad_gru_state);
-  for (i=0;i<rnn->model->input_dense_size;i++) noise_input[i] = dense_out[i];
-  for (i=0;i<rnn->model->vad_gru_size;i++) noise_input[i+rnn->model->input_dense_size] = rnn->vad_gru_state[i];
-  for (i=0;i<INPUT_SIZE;i++) noise_input[i+rnn->model->input_dense_size+rnn->model->vad_gru_size] = input[i];
+  for (i = 0; i < rnn->model->input_dense_size; i++)
+    noise_input[i] = dense_out[i];
+  for (i = 0; i < rnn->model->vad_gru_size; i++)
+    noise_input[i + rnn->model->input_dense_size] = rnn->vad_gru_state[i];
+  for (i = 0; i < INPUT_SIZE; i++)
+    noise_input[i + rnn->model->input_dense_size + rnn->model->vad_gru_size] =
+        input[i];
   compute_gru(rnn->model->noise_gru, rnn->noise_gru_state, noise_input);
 
-  for (i=0;i<rnn->model->vad_gru_size;i++) denoise_input[i] = rnn->vad_gru_state[i];
-  for (i=0;i<rnn->model->noise_gru_size;i++) denoise_input[i+rnn->model->vad_gru_size] = rnn->noise_gru_state[i];
-  for (i=0;i<INPUT_SIZE;i++) denoise_input[i+rnn->model->vad_gru_size+rnn->model->noise_gru_size] = input[i];
+  for (i = 0; i < rnn->model->vad_gru_size; i++)
+    denoise_input[i] = rnn->vad_gru_state[i];
+  for (i = 0; i < rnn->model->noise_gru_size; i++)
+    denoise_input[i + rnn->model->vad_gru_size] = rnn->noise_gru_state[i];
+  for (i = 0; i < INPUT_SIZE; i++)
+    denoise_input[i + rnn->model->vad_gru_size + rnn->model->noise_gru_size] =
+        input[i];
   compute_gru(rnn->model->denoise_gru, rnn->denoise_gru_state, denoise_input);
   compute_dense(rnn->model->denoise_output, gains, rnn->denoise_gru_state);
 }

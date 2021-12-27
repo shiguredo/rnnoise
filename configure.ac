@@ -73,6 +73,14 @@ AS_IF([test "$enable_assertions" = "yes"], [
   AC_DEFINE([OP_ENABLE_ASSERTIONS], [1], [Enable assertions in code])
 ])
 
+AC_ARG_ENABLE([wasm_simd],
+  AS_HELP_STRING([--enable-wasm-simd], [Enable WebAssembly SIMD in code]),,
+  enable_wasm_simd=no)
+
+AS_IF([test "$enable_wasm_simd" = "yes"], [
+  AC_DEFINE([ENABLE_WASM_SIMD], [1], [Enable WebAssembly SIMD in code])
+])
+
 AC_ARG_ENABLE([examples],
   AS_HELP_STRING([--disable-examples], [Do not build example applications]),,
   enable_examples=yes)
@@ -120,6 +128,8 @@ AC_MSG_NOTICE([
   $PACKAGE_NAME $PACKAGE_VERSION: Automatic configuration OK.
 
     Assertions ................... ${enable_assertions}
+
+    WebAssembly SIMD ................... ${enable_wasm_simd}
 
     Hidden visibility ............ ${cc_cv_flag_visibility}
 
