@@ -29,6 +29,7 @@
 #include "config.h"
 #endif
 
+#include <assert.h>
 #include <math.h>
 #include <stdio.h>
 #include "arch.h"
@@ -96,7 +97,8 @@ void compute_dense(const DenseLayer* layer, float* output, const float* input) {
     for (i = 0; i < N; i++)
       output[i] = relu(output[i]);
   } else {
-    *(int*)0 = 0;
+    /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+    assert(0);
   }
 }
 
@@ -226,7 +228,8 @@ static void _compute_gru_output_wasm_simd(const GRULayer* gru,
     else if (gru->activation == ACTIVATION_RELU)
       sum = relu(WEIGHTS_SCALE * sum);
     else
-      *(int*)0 = 0;
+      /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+      assert(0);
 
     state[i] = z[i] * state[i] + (1 - z[i]) * sum;
   }
@@ -287,7 +290,8 @@ void compute_gru(const GRULayer* gru, float* state, const float* input) {
     else if (gru->activation == ACTIVATION_RELU)
       sum = relu(WEIGHTS_SCALE * sum);
     else
-      *(int*)0 = 0;
+      /* rnn_reader.cのINPUT_ACTIVATIONマクロによる初期化処理的にここに来ることはない */
+      assert(0);
     h[i] = z[i] * state[i] + (1 - z[i]) * sum;
   }
   for (i = 0; i < N; i++)
