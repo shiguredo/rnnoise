@@ -154,6 +154,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
   if (!ret)
     return NULL;
 
+#undef ALLOC_LAYER
 #define ALLOC_LAYER(type, name)   \
   type* name;                     \
   name = calloc(1, sizeof(type)); \
@@ -170,6 +171,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
   ALLOC_LAYER(DenseLayer, denoise_output);
   ALLOC_LAYER(DenseLayer, vad_output);
 
+#undef INPUT_VAL
 #define INPUT_VAL(name)                                            \
   do {                                                             \
     if (sscanf(s, "%d%n", &in, &n) != 1 || in < 0 || in > 128) {   \
@@ -180,6 +182,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
     name = in;                                                     \
   } while (0)
 
+#undef INPUT_ACTIVATION
 #define INPUT_ACTIVATION(name)     \
   do {                             \
     int activation;                \
@@ -196,6 +199,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
     }                              \
   } while (0)
 
+#undef INPUT_ARRAY
 #define INPUT_ARRAY(name, len)                               \
   do {                                                       \
     rnn_weight* values = malloc((len) * sizeof(rnn_weight)); \
@@ -214,6 +218,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
     }                                                        \
   } while (0)
 
+#undef INPUT_DENSE
 #define INPUT_DENSE(name)                                                 \
   do {                                                                    \
     INPUT_VAL(name->nb_inputs);                                           \
@@ -224,6 +229,7 @@ RNNModel* rnnoise_model_from_string(const char* s) {
     INPUT_ARRAY(name->bias, name->nb_neurons);                            \
   } while (0)
 
+#undef INPUT_GRU
 #define INPUT_GRU(name)                                                       \
   do {                                                                        \
     INPUT_VAL(name->nb_inputs);                                               \
