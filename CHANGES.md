@@ -11,6 +11,11 @@
 
 ## develop
 
+## 2022.1.0
+- [ADD] `rnnoise_model_from_string` 関数を追加
+    - https://github.com/shiguredo/rnnoise/pull/6
+    - @sile
+
 ## 2021.1.0
 
 - [UPDATE] READMEとCOPYINGを更新
