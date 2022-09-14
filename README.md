@@ -39,7 +39,7 @@ $ ./configure --enable-wasm-simd
 [The 3-Clause BSD License](https://opensource.org/licenses/BSD-3-Clause)
 
 ```
-Copyright (c) 2021, Shiguredo Inc.
+Copyright (c) 2021-2022, Shiguredo Inc.
 Copyright (c) 2017, Mozilla
 Copyright (c) 2007-2017, Jean-Marc Valin
 Copyright (c) 2005-2017, Xiph.Org Foundation
