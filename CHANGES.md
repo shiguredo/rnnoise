@@ -11,6 +11,11 @@
 
 ## develop
 
+### misc
+
+- [UPDATE] actions/checkout と actions/download-artifact を v5 に上げる
+  - @miosakuma
+
 ## 2022.1.0
 - [ADD] `rnnoise_model_from_string` 関数を追加
     - https://github.com/shiguredo/rnnoise/pull/6
